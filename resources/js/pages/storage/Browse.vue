@@ -237,6 +237,7 @@ const previewMeta = computed(() => {
     const parts: string[] = [typeLabelFor(item), formatBytes(item.size_bytes), `Updated ${formatDate(item.updated_at)}`];
     const version = versionLabelFor(item);
 
+
     if (version) {
         parts.push(version);
     }
