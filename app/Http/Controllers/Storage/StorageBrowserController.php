@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Storage;
 
+use App\Enums\StorageAudience;
 use App\Enums\StorageItemType;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\Storage\StorageItemResource;
@@ -18,18 +19,83 @@ class StorageBrowserController extends Controller
         $user = $request->user();
 
         $currentFolder = $this->resolveFolder($request);
+        $relations = ['latestVersion', 'tags', 'permissions.user', 'shareLinks', 'audiences.team'];
 
         $items = StorageItem::query()
             ->forUser($user)
             ->whereNull('deleted_at')
             ->where('parent_id', $currentFolder?->getKey())
-            ->with(['latestVersion', 'tags', 'permissions.user', 'shareLinks'])
+            ->with($relations)
             ->orderByDesc('is_pinned')
             ->orderByDesc('is_favorite')
             ->orderBy('type')
             ->orderBy('name')
             ->paginate(30)
             ->withQueryString();
+
+        $teams = $user->teams()
+            ->orderBy('name')
+            ->get(['teams.id', 'teams.name', 'teams.slug']);
+
+        $teamIds = $teams->pluck('id');
+
+        $companySharedItems = StorageItem::query()
+            ->whereNull('deleted_at')
+            ->whereHas('audiences', static function ($query): void {
+                $query->where('audience', StorageAudience::Company);
+            })
+            ->with($relations)
+            ->orderByDesc('is_pinned')
+            ->orderByDesc('is_favorite')
+            ->orderBy('type')
+            ->orderBy('name')
+            ->limit(200)
+            ->get();
+
+        $teamSharedItems = $teamIds->isEmpty()
+            ? collect()
+            : StorageItem::query()
+                ->whereNull('deleted_at')
+                ->whereHas('audiences', static function ($query) use ($teamIds): void {
+                    $query->where('audience', StorageAudience::Team)
+                        ->whereIn('team_id', $teamIds);
+                })
+                ->with($relations)
+                ->orderByDesc('is_pinned')
+                ->orderByDesc('is_favorite')
+                ->orderBy('type')
+                ->orderBy('name')
+                ->limit(200)
+                ->get();
+
+        $teamItemsByTeam = [];
+
+        foreach ($teamSharedItems as $sharedItem) {
+            $sharedItem->loadMissing('audiences');
+
+            foreach ($sharedItem->audiences
+                ->where('audience', StorageAudience::Team)
+                ->whereIn('team_id', $teamIds) as $audience) {
+                $teamItemsByTeam[$audience->team_id] ??= collect();
+
+                if (! $teamItemsByTeam[$audience->team_id]->contains(fn ($candidate) => $candidate->getKey() === $sharedItem->getKey())) {
+                    $teamItemsByTeam[$audience->team_id]->push($sharedItem);
+                }
+            }
+        }
+
+        $personalSharedItems = StorageItem::query()
+            ->whereNull('deleted_at')
+            ->whereHas('permissions', static function ($query) use ($user): void {
+                $query->where('user_id', $user->getKey());
+            })
+            ->with($relations)
+            ->orderByDesc('is_pinned')
+            ->orderByDesc('is_favorite')
+            ->orderBy('type')
+            ->orderBy('name')
+            ->limit(200)
+            ->get();
 
         return Inertia::render('storage/Browse', [
             'filters' => [
@@ -54,6 +120,31 @@ class StorageBrowserController extends Controller
                     'version_cap' => (int) $user->version_cap,
                     'trash_retention_days' => (int) config('airlane.trash_retention_days'),
                 ],
+            ],
+            'teams' => $teams->map(static fn ($team) => [
+                'id' => $team->getKey(),
+                'name' => $team->name,
+                'slug' => $team->slug,
+            ]),
+            'shared' => [
+                'company' => StorageItemResource::collection($companySharedItems)->resolve(),
+                'teams' => $teams->map(function ($team) use ($teamItemsByTeam) {
+                    $itemsForTeam = $teamItemsByTeam[$team->getKey()] ?? collect();
+
+                    if ($itemsForTeam->isEmpty()) {
+                        return null;
+                    }
+
+                    return [
+                        'team' => [
+                            'id' => $team->getKey(),
+                            'name' => $team->name,
+                            'slug' => $team->slug,
+                        ],
+                        'items' => StorageItemResource::collection($itemsForTeam)->resolve(),
+                    ];
+                })->filter()->values(),
+                'personal' => StorageItemResource::collection($personalSharedItems)->resolve(),
             ],
         ]);
     }

@@ -2,13 +2,16 @@
 
 namespace App\Services\Storage;
 
+use App\Enums\StorageAudience;
 use App\Enums\StorageItemType;
 use App\Enums\StoragePermission;
 use App\Exceptions\Storage\FileSizeLimitExceededException;
 use App\Models\StorageItem;
+use App\Models\StorageItemAudience;
 use App\Models\StorageItemPermission;
 use App\Models\StorageItemVersion;
 use App\Models\StorageShareLink;
+use App\Models\Team;
 use App\Models\User;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\UploadedFile;
@@ -22,8 +25,7 @@ class StorageService
 {
     public function __construct(
         private readonly StorageQuotaManager $quotaManager,
-    ) {
-    }
+    ) {}
 
     public function createFolder(User $user, string $name, ?StorageItem $parent = null, array $metadata = []): StorageItem
     {
@@ -169,7 +171,7 @@ class StorageService
         }
 
         $user = $author ?? $item->owner;
-    $size = mb_strlen($content, '8bit');
+        $size = mb_strlen($content, '8bit');
 
         $this->quotaManager->ensureCanStore($user, $size);
 
@@ -283,6 +285,8 @@ class StorageService
         ?CarbonImmutable $expiresAt = null,
         ?int $maxViews = null,
     ): StorageShareLink {
+        $permission = StoragePermission::Viewer;
+
         return DB::transaction(function () use ($item, $creator, $permission, $expiresAt, $maxViews) {
             $link = $item->shareLinks()->first();
 
@@ -315,6 +319,8 @@ class StorageService
         ?CarbonImmutable $expiresAt = null,
         ?int $maxViews = null,
     ): StorageShareLink {
+        $permission = StoragePermission::Viewer;
+
         return DB::transaction(function () use ($link, $permission, $expiresAt, $maxViews) {
             $link->forceFill([
                 'permission' => $permission,
@@ -323,6 +329,59 @@ class StorageService
             ])->save();
 
             return $link->refresh();
+        });
+    }
+
+    public function shareWithCompany(StorageItem $item, User $actor, ?CarbonImmutable $expiresAt = null): StorageItemAudience
+    {
+        return DB::transaction(function () use ($item, $actor, $expiresAt) {
+            /** @var StorageItemAudience $audience */
+            $audience = StorageItemAudience::query()->updateOrCreate(
+                [
+                    'storage_item_id' => $item->getKey(),
+                    'audience' => StorageAudience::Company,
+                    'team_id' => null,
+                ],
+                [
+                    'created_by' => $actor->getKey(),
+                    'permission' => StoragePermission::Viewer,
+                    'expires_at' => $expiresAt,
+                ],
+            );
+
+            return $audience->fresh(['team']);
+        });
+    }
+
+    public function shareWithTeam(
+        StorageItem $item,
+        Team $team,
+        User $actor,
+        ?CarbonImmutable $expiresAt = null,
+    ): StorageItemAudience {
+        return DB::transaction(function () use ($item, $team, $actor, $expiresAt) {
+            /** @var StorageItemAudience $audience */
+            $audience = StorageItemAudience::query()->updateOrCreate(
+                [
+                    'storage_item_id' => $item->getKey(),
+                    'audience' => StorageAudience::Team,
+                    'team_id' => $team->getKey(),
+                ],
+                [
+                    'created_by' => $actor->getKey(),
+                    'permission' => StoragePermission::Viewer,
+                    'expires_at' => $expiresAt,
+                ],
+            );
+
+            return $audience->fresh(['team']);
+        });
+    }
+
+    public function revokeAudience(StorageItemAudience $audience): void
+    {
+        DB::transaction(static function () use ($audience): void {
+            $audience->delete();
         });
     }
 

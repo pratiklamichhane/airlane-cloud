@@ -37,6 +37,7 @@ class UserFactory extends Factory
             'max_storage_bytes' => Plan::default()->storageLimitBytes(),
             'max_file_size_bytes' => Plan::default()->maxFileSizeBytes(),
             'version_cap' => Plan::default()->versionCap(),
+            'is_admin' => false,
         ];
     }
 

@@ -2,6 +2,7 @@
 
 namespace App\Http\Resources\Storage;
 
+use App\Enums\StorageAudience;
 use App\Enums\StorageItemType;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
@@ -78,6 +79,37 @@ class StorageItemResource extends JsonResource
                         'url' => route('storage.share-links.show', ['token' => $link->token]),
                     ];
                 }, null),
+                'company' => $this->whenLoaded('audiences', function () {
+                    $audience = $this->audiences->firstWhere('audience', StorageAudience::Company);
+
+                    if ($audience === null) {
+                        return null;
+                    }
+
+                    return [
+                        'id' => $audience->getKey(),
+                        'expires_at' => $audience->expires_at?->toIso8601String(),
+                    ];
+                }, null),
+                'teams' => $this->whenLoaded('audiences', function () {
+                    return $this->audiences
+                        ->filter(fn ($audience) => $audience->audience === StorageAudience::Team)
+                        ->map(function ($audience) {
+                            return [
+                                'id' => $audience->getKey(),
+                                'expires_at' => $audience->expires_at?->toIso8601String(),
+                                'team' => $audience->relationLoaded('team') && $audience->team
+                                    ? [
+                                        'id' => $audience->team->getKey(),
+                                        'name' => $audience->team->name,
+                                        'slug' => $audience->team->slug,
+                                    ]
+                                    : null,
+                            ];
+                        })
+                        ->values()
+                        ->all();
+                }, []),
                 'permissions' => $this->whenLoaded('permissions', function () {
                     return $this->permissions->map(static function ($permission) {
                         return [

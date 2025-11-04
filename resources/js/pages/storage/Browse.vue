@@ -90,8 +90,19 @@ interface StorageItemPublicLink {
     url: string;
 }
 
+interface StorageItemAudienceSummary {
+    id: number;
+    expires_at?: string | null;
+}
+
+interface StorageItemTeamAudience extends StorageItemAudienceSummary {
+    team: TeamSummary | null;
+}
+
 interface StorageItemSharing {
     public_link: StorageItemPublicLink | null;
+    company: StorageItemAudienceSummary | null;
+    teams: StorageItemTeamAudience[];
     permissions: StorageItemSharePermission[];
 }
 
@@ -178,6 +189,23 @@ interface Summary {
     };
 }
 
+interface TeamSummary {
+    id: number;
+    name: string;
+    slug: string;
+}
+
+interface SharedTeamGroup {
+    team: TeamSummary;
+    items: StorageItemResource[];
+}
+
+interface SharedItems {
+    company: StorageItemResource[];
+    teams: SharedTeamGroup[];
+    personal: StorageItemResource[];
+}
+
 interface PageProps {
     filters: {
         folder?: number | null;
@@ -186,6 +214,8 @@ interface PageProps {
     items: Paginated<StorageItemResource>;
     breadcrumbs: BreadcrumbItem[];
     summary: Summary;
+    teams: TeamSummary[];
+    shared: SharedItems;
 }
 
 const props = defineProps<PageProps & {
@@ -194,7 +224,7 @@ const props = defineProps<PageProps & {
     auth: AuthProps;
     sidebarOpen: boolean;
 }>();
-const { folder, items, summary, breadcrumbs } = toRefs(props);
+const { folder, items, summary, breadcrumbs, teams, shared } = toRefs(props);
 
 const uploadSheetOpen = ref(false);
 const folderSheetOpen = ref(false);
@@ -253,6 +283,9 @@ let shareCopyTimeout: ReturnType<typeof setTimeout> | null = null;
 
 const sharePermissions = computed(() => shareItem.value?.sharing?.permissions ?? []);
 const publicLink = computed(() => shareItem.value?.sharing?.public_link ?? null);
+const companyAudience = computed(() => shareItem.value?.sharing?.company ?? null);
+const teamAudiences = computed(() => shareItem.value?.sharing?.teams ?? []);
+const availableTeams = computed(() => teams.value ?? []);
 
 watch(uploadSheetOpen, (isOpen) => {
     if (!isOpen) {
@@ -370,10 +403,114 @@ const trashRetentionLabel = computed(
 
 const paginatedItems = computed(() => items.value?.data ?? []);
 const paginationLinks = computed(() => items.value?.meta?.links ?? []);
-const totalItems = computed(() => items.value?.meta?.total ?? paginatedItems.value.length);
-const hasItems = computed(() => paginatedItems.value.length > 0);
 
-watch(paginatedItems, (itemList) => {
+const sharedCompanyItems = computed(() => shared.value?.company ?? []);
+const sharedTeamGroups = computed(() => shared.value?.teams ?? []);
+const sharedPersonalItems = computed(() => shared.value?.personal ?? []);
+
+const teamTabPrefix = 'team:';
+
+const allItems = computed<StorageItemResource[]>(() => {
+    const ordered: StorageItemResource[] = [];
+    const indexLookup = new Map<number, number>();
+
+    const addItems = (list: StorageItemResource[]) => {
+        list.forEach((item) => {
+            const existingIndex = indexLookup.get(item.id);
+
+            if (existingIndex === undefined) {
+                indexLookup.set(item.id, ordered.length);
+                ordered.push(item);
+            } else {
+                ordered[existingIndex] = item;
+            }
+        });
+    };
+
+    addItems(paginatedItems.value);
+    addItems(sharedCompanyItems.value);
+    sharedTeamGroups.value.forEach((group) => addItems(group.items));
+    addItems(sharedPersonalItems.value);
+
+    return ordered;
+});
+
+const selectedTab = ref<string>('all');
+
+const visibleTabs = computed(() => {
+    const tabs: Array<{ value: string; label: string; count: number }> = [
+        {
+            value: 'all',
+            label: 'All',
+            count: allItems.value.length,
+        },
+    ];
+
+    if (sharedCompanyItems.value.length > 0) {
+        tabs.push({
+            value: 'company',
+            label: 'In company',
+            count: sharedCompanyItems.value.length,
+        });
+    }
+
+    sharedTeamGroups.value.forEach((group) => {
+        if (group.items.length === 0) {
+            return;
+        }
+
+        tabs.push({
+            value: `${teamTabPrefix}${group.team.id}`,
+            label: group.team.name,
+            count: group.items.length,
+        });
+    });
+
+    if (sharedPersonalItems.value.length > 0) {
+        tabs.push({
+            value: 'personal',
+            label: 'Shared with me',
+            count: sharedPersonalItems.value.length,
+        });
+    }
+
+    return tabs;
+});
+
+watch(visibleTabs, (tabs) => {
+    if (!tabs.some((tab) => tab.value === selectedTab.value)) {
+        selectedTab.value = 'all';
+    }
+});
+
+const displayedItems = computed(() => {
+    if (selectedTab.value === 'all') {
+        return allItems.value;
+    }
+
+    if (selectedTab.value === 'company') {
+        return sharedCompanyItems.value;
+    }
+
+    if (selectedTab.value === 'personal') {
+        return sharedPersonalItems.value;
+    }
+
+    if (selectedTab.value.startsWith(teamTabPrefix)) {
+        const teamId = Number.parseInt(selectedTab.value.slice(teamTabPrefix.length), 10);
+        const group = sharedTeamGroups.value.find((candidate) => candidate.team.id === teamId);
+
+        return group?.items ?? [];
+    }
+
+    return [];
+});
+
+const totalItems = computed(() => displayedItems.value.length);
+const hasItems = computed(() => displayedItems.value.length > 0);
+const showPagination = computed(() => selectedTab.value === 'all' && paginationLinks.value.length > 1);
+
+watch(allItems, (itemList) => {
     if (!shareItem.value) {
         return;
     }
@@ -388,12 +525,79 @@ watch(paginatedItems, (itemList) => {
     }
 });
 
-const emptyHeadline = computed(() => (folder.value ? 'This folder is empty' : 'Your storage is ready'));
-const emptyBody = computed(() =>
-    folder.value
-        ? 'Use the actions above to add files, notes, or sub-folders.'
-        : 'Upload a file, create a note, or make a folder to get started.',
-);
+const currentTabDescription = computed(() => {
+    if (selectedTab.value === 'all') {
+        return folder.value
+            ? `Items inside ${folder.value.name}`
+            : 'Browse everything you can access, including shared files.';
+    }
+
+    if (selectedTab.value === 'company') {
+        return 'Files shared with everyone in your company.';
+    }
+
+    if (selectedTab.value === 'personal') {
+        return 'Files teammates have shared directly with you.';
+    }
+
+    if (selectedTab.value.startsWith(teamTabPrefix)) {
+        const teamId = Number.parseInt(selectedTab.value.slice(teamTabPrefix.length), 10);
+        const group = sharedTeamGroups.value.find((candidate) => candidate.team.id === teamId);
+
+        if (group) {
+            return `Files shared with ${group.team.name}.`;
+        }
+
+        return 'Shared items from your teams.';
+    }
+
+    return 'Files & folders you can access.';
+});
+
+const emptyHeadline = computed(() => {
+    if (selectedTab.value === 'all') {
+        return folder.value ? 'This folder is empty' : 'Your storage is ready';
+    }
+
+    if (selectedTab.value === 'company') {
+        return 'No company-wide shares yet';
+    }
+
+    if (selectedTab.value === 'personal') {
+        return 'Nothing has been shared with you yet';
+    }
+
+    if (selectedTab.value.startsWith(teamTabPrefix)) {
+        const teamId = Number.parseInt(selectedTab.value.slice(teamTabPrefix.length), 10);
+        const group = sharedTeamGroups.value.find((candidate) => candidate.team.id === teamId);
+
+        return group ? `No files shared with ${group.team.name} yet` : 'No team shares yet';
+    }
+
+    return 'No items available';
+});
+
+const emptyBody = computed(() => {
+    if (selectedTab.value === 'all') {
+        return folder.value
+            ? 'Use the actions above to add files, notes, or sub-folders.'
+            : 'Upload a file, create a note, or make a folder to get started.';
+    }
+
+    if (selectedTab.value === 'company') {
+        return 'When someone shares an item with the whole company, it will appear here.';
+    }
+
+    if (selectedTab.value === 'personal') {
+        return 'Private shares from teammates will show up in this tab.';
+    }
+
+    if (selectedTab.value.startsWith(teamTabPrefix)) {
+        return 'Ask a teammate to share something with your team to see it here.';
+    }
+
+    return 'Nothing to display right now.';
+});
 
 const handleUploadSuccess = () => {
     uploadSheetOpen.value = false;
@@ -532,6 +736,10 @@ function shareViewCountLabel(link: StorageItemPublicLink): string {
     }
 
     return `${link.view_count} of ${link.max_views} views`;
+}
+
+function teamOptionLabel(team: TeamSummary): string {
+    return team.name;
 }
 
 function closeSheet(
@@ -948,8 +1156,30 @@ onBeforeUnmount(() => {
                     <div class="flex flex-col gap-1">
                         <CardTitle>Files &amp; folders</CardTitle>
                         <CardDescription>
-                            {{ folder ? `Items inside ${folder.name}` : 'Browse everything you have stored in Airlane.' }}
+                            {{ currentTabDescription }}
                         </CardDescription>
+                        <div
+                            v-if="visibleTabs.length > 1"
+                            class="mt-4 flex flex-wrap items-center gap-2"
+                        >
+                            <button
+                                v-for="tab in visibleTabs"
+                                :key="tab.value"
+                                type="button"
+                                @click="selectedTab = tab.value"
+                                :class="[
+                                    'flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm transition-colors',
+                                    selectedTab === tab.value
+                                        ? 'border-primary/50 bg-primary/10 text-foreground'
+                                        : 'border-transparent bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground',
+                                ]"
+                            >
+                                <span>{{ tab.label }}</span>
+                                <span class="rounded bg-muted px-1.5 py-0.5 text-xs font-medium text-muted-foreground">
+                                    {{ tab.count }}
+                                </span>
+                            </button>
+                        </div>
                     </div>
                     <div class="text-sm text-muted-foreground">
                         {{ totalItems }} item{{ totalItems === 1 ? '' : 's' }}
@@ -958,7 +1188,7 @@ onBeforeUnmount(() => {
                 <CardContent class="px-0">
                     <div v-if="hasItems" class="divide-y">
                         <div
-                            v-for="item in paginatedItems"
+                            v-for="item in displayedItems"
                             :key="item.id"
                             class="flex flex-col gap-3 px-6 py-4 sm:flex-row sm:items-center sm:justify-between"
                         >
@@ -1111,34 +1341,39 @@ onBeforeUnmount(() => {
                 </CardContent>
 
                 <CardContent
-                    v-if="paginationLinks.length > 1"
+                    v-if="showPagination"
                     class="border-t px-6 py-4"
                 >
-                    <nav class="flex flex-wrap items-center gap-2 text-sm">
-                        <template
-                            v-for="(link, index) in paginationLinks"
-                            :key="index"
-                        >
-                            <Link
-                                v-if="link.url"
-                                :href="link.url"
-                                preserve-scroll
-                                preserve-state
-                                v-html="link.label"
-                                :class="[
-                                    'inline-flex items-center rounded-md px-3 py-1.5 transition-colors',
-                                    link.active
-                                        ? 'bg-muted text-foreground'
-                                        : 'text-muted-foreground hover:bg-muted/80',
-                                ]"
-                            />
-                            <span
-                                v-else
-                                v-html="link.label"
-                                class="inline-flex items-center rounded-md px-3 py-1.5 text-muted-foreground/70"
-                            />
-                        </template>
-                    </nav>
+                    <div class="flex flex-col gap-2 text-sm sm:flex-row sm:items-center sm:justify-between">
+                        <div class="text-xs text-muted-foreground">
+                            Page {{ items.meta?.current_page ?? 1 }} of {{ items.meta?.last_page ?? 1 }}
+                        </div>
+                        <nav class="flex flex-wrap items-center gap-2">
+                            <template
+                                v-for="(link, index) in paginationLinks"
+                                :key="index"
+                            >
+                                <Link
+                                    v-if="link.url"
+                                    :href="link.url"
+                                    preserve-scroll
+                                    preserve-state
+                                    v-html="link.label"
+                                    :class="[
+                                        'inline-flex items-center rounded-md px-3 py-1.5 transition-colors',
+                                        link.active
+                                            ? 'bg-muted text-foreground'
+                                            : 'text-muted-foreground hover:bg-muted/80',
+                                    ]"
+                                />
+                                <span
+                                    v-else
+                                    v-html="link.label"
+                                    class="inline-flex items-center rounded-md px-3 py-1.5 text-muted-foreground/70"
+                                />
+                            </template>
+                        </nav>
+                    </div>
                 </CardContent>
             </Card>
         </div>
@@ -1185,25 +1420,7 @@ onBeforeUnmount(() => {
                             reset-on-success
                             v-slot="{ errors, processing }"
                         >
-                            <div class="grid gap-3 sm:grid-cols-3">
-                                <div class="grid gap-1">
-                                    <Label for="share-link-permission">Permission</Label>
-                                    <select
-                                        id="share-link-permission"
-                                        name="permission"
-                                        class="border-input focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] dark:bg-input/30 h-10 w-full rounded-md border bg-background px-3 text-sm shadow-xs outline-none transition-[color,box-shadow]"
-                                        :value="publicLink?.permission ?? 'viewer'"
-                                    >
-                                        <option
-                                            v-for="option in sharePermissionOptions"
-                                            :key="option.value"
-                                            :value="option.value"
-                                        >
-                                            {{ option.label }}
-                                        </option>
-                                    </select>
-                                    <InputError :message="errors.permission" />
-                                </div>
+                            <div class="grid gap-3 sm:grid-cols-2">
                                 <div class="grid gap-1">
                                     <Label for="share-link-max-views">View limit</Label>
                                     <Input
@@ -1227,9 +1444,12 @@ onBeforeUnmount(() => {
                                     <InputError :message="errors.expires_at" />
                                 </div>
                             </div>
+                            <p class="pt-2 text-xs text-muted-foreground">
+                                Public links allow anyone with the URL to view this item.
+                            </p>
                             <div class="flex justify-end gap-2 pt-3">
                                 <Button type="submit" :disabled="processing">
-                                    {{ publicLink ? 'Update link' : 'Create link' }}
+                                    {{ publicLink ? 'Update link' : 'Enable link' }}
                                 </Button>
                             </div>
                         </Form>
@@ -1272,6 +1492,140 @@ onBeforeUnmount(() => {
                             </p>
                         </div>
 
+                        <section class="space-y-3 rounded-lg border border-border/60 bg-muted/20 p-4">
+                            <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                                <div class="space-y-1">
+                                    <h4 class="text-sm font-medium text-foreground">Everyone in the company</h4>
+                                    <p class="text-xs text-muted-foreground">
+                                        Grant view-only access to all authenticated users.
+                                    </p>
+                                </div>
+                                <Form
+                                    v-if="companyAudience"
+                                    v-bind="storage.items.share.audiences.destroy.form({
+                                        storageItem: shareItem.id,
+                                        storageItemAudience: companyAudience.id,
+                                    })"
+                                    :options="{ preserveScroll: true }"
+                                    v-slot="{ processing }"
+                                >
+                                    <Button type="submit" variant="destructive" size="sm" :disabled="processing">
+                                        Remove company access
+                                    </Button>
+                                </Form>
+                            </div>
+
+                            <div v-if="companyAudience" class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                                <span>Viewing only</span>
+                                <span aria-hidden="true">•</span>
+                                <span>{{ shareExpiresLabel(companyAudience.expires_at) }}</span>
+                            </div>
+
+                            <Form
+                                v-else
+                                v-bind="storage.items.share.audiences.store.form({ storageItem: shareItem.id })"
+                                :options="{ preserveScroll: true }"
+                                v-slot="{ errors, processing }"
+                            >
+                                <input type="hidden" name="audience" value="company" />
+                                <div class="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                                    <div class="grid gap-1">
+                                        <Label for="company-share-expires">Expires</Label>
+                                        <Input id="company-share-expires" name="expires_at" type="datetime-local" />
+                                        <InputError :message="errors.expires_at" />
+                                    </div>
+                                </div>
+                                <div class="flex justify-end gap-2 pt-3">
+                                    <Button type="submit" :disabled="processing">
+                                        Share with company
+                                    </Button>
+                                </div>
+                            </Form>
+                        </section>
+
+                        <section class="space-y-3 rounded-lg border border-border/60 bg-muted/20 p-4">
+                            <div class="space-y-1">
+                                <h4 class="text-sm font-medium text-foreground">Everyone in a team</h4>
+                                <p class="text-xs text-muted-foreground">
+                                    Share view-only access with specific teams you belong to.
+                                </p>
+                            </div>
+
+                            <Form
+                                v-if="availableTeams.length"
+                                v-bind="storage.items.share.audiences.store.form({ storageItem: shareItem.id })"
+                                :options="{ preserveScroll: true }"
+                                v-slot="{ errors, processing }"
+                            >
+                                <input type="hidden" name="audience" value="team" />
+                                <div class="grid gap-3 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+                                    <div class="grid gap-1">
+                                        <Label for="team-share-team">Team</Label>
+                                        <select
+                                            id="team-share-team"
+                                            name="team_id"
+                                            class="border-input focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] dark:bg-input/30 h-10 w-full rounded-md border bg-background px-3 text-sm shadow-xs outline-none transition-[color,box-shadow]"
+                                        >
+                                            <option disabled value="">Select a team</option>
+                                            <option
+                                                v-for="team in availableTeams"
+                                                :key="team.id"
+                                                :value="team.id"
+                                            >
+                                                {{ teamOptionLabel(team) }}
+                                            </option>
+                                        </select>
+                                        <InputError :message="errors.team_id" />
+                                    </div>
+                                    <div class="grid gap-1">
+                                        <Label for="team-share-expires">Expires</Label>
+                                        <Input id="team-share-expires" name="expires_at" type="datetime-local" />
+                                        <InputError :message="errors.expires_at" />
+                                    </div>
+                                </div>
+                                <div class="flex justify-end gap-2 pt-3">
+                                    <Button type="submit" :disabled="processing">
+                                        Share with team
+                                    </Button>
+                                </div>
+                            </Form>
+                            <p v-else class="text-xs text-muted-foreground">
+                                You are not a member of any teams yet.
+                            </p>
+
+                            <div v-if="teamAudiences.length" class="space-y-2 pt-2">
+                                <div
+                                    v-for="audience in teamAudiences"
+                                    :key="audience.id"
+                                    class="flex flex-col gap-2 rounded-md border border-border/60 bg-background p-3 sm:flex-row sm:items-center sm:justify-between"
+                                >
+                                    <div class="space-y-1">
+                                        <div class="text-sm font-medium text-foreground">
+                                            {{ audience.team?.name ?? 'Team access' }}
+                                        </div>
+                                        <div class="flex flex-wrap items-center gap-x-3 text-xs text-muted-foreground">
+                                            <span>Viewing only</span>
+                                            <span aria-hidden="true">•</span>
+                                            <span>{{ shareExpiresLabel(audience.expires_at) }}</span>
+                                        </div>
+                                    </div>
+                                    <Form
+                                        v-bind="storage.items.share.audiences.destroy.form({
+                                            storageItem: shareItem.id,
+                                            storageItemAudience: audience.id,
+                                        })"
+                                        :options="{ preserveScroll: true }"
+                                        v-slot="{ processing }"
+                                    >
+                                        <Button type="submit" variant="ghost" size="sm" class="gap-2 text-destructive hover:text-destructive" :disabled="processing">
+                                            <Trash2 class="size-3.5" />
+                                            Remove
+                                        </Button>
+                                    </Form>
+                                </div>
+                            </div>
+                        </section>
+
                         <Form
                             v-bind="storage.items.share.permissions.store.form({ storageItem: shareItem.id })"
                             :options="{ preserveScroll: true }"
@@ -1281,16 +1635,15 @@ onBeforeUnmount(() => {
                             <template v-if="registerShareHandlers(reset, clearErrors)" />
                             <div class="grid gap-3 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)]">
                                 <div class="grid gap-1">
-                                    <Label for="share-email">Email</Label>
-                                    <Input
-                                        id="share-email"
-                                        name="email"
-                                        type="email"
+                                    <Label for="share-emails">Emails</Label>
+                                    <Textarea
+                                        id="share-emails"
+                                        name="emails"
                                         required
-                                        autocomplete="email"
-                                        placeholder="collaborator@example.com"
+                                        placeholder="jane@example.com, john@example.com"
+                                        rows="3"
                                     />
-                                    <InputError :message="errors.email" />
+                                    <InputError :message="errors.emails" />
                                 </div>
                                 <div class="grid gap-1">
                                     <Label for="share-permission">Permission</Label>

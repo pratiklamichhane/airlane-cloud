@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Storage;
 
+use App\Enums\StoragePermission;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Storage\StoreShareLinkRequest;
 use App\Http\Requests\Storage\UpdateShareLinkRequest;
@@ -25,7 +26,7 @@ class StorageItemShareLinkController extends Controller
         $storageService->enablePublicLink(
             $storageItem,
             $actor,
-            $request->permission(),
+            StoragePermission::Viewer,
             $request->expiresAt(),
             $request->maxViews(),
         );
@@ -45,7 +46,7 @@ class StorageItemShareLinkController extends Controller
 
         $storageService->updatePublicLink(
             $storageShareLink,
-            $request->permission(),
+            StoragePermission::Viewer,
             $request->expiresAt(),
             $request->maxViews(),
         );

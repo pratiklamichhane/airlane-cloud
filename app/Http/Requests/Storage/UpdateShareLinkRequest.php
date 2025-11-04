@@ -2,18 +2,11 @@
 
 namespace App\Http\Requests\Storage;
 
-use App\Enums\StoragePermission;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Http\FormRequest;
-use Illuminate\Validation\Rule;
 
 class UpdateShareLinkRequest extends FormRequest
 {
-    private const ASSIGNABLE_PERMISSIONS = [
-        StoragePermission::Viewer->value,
-        StoragePermission::Editor->value,
-    ];
-
     /**
      * Determine if the user is authorized to make this request.
      */
@@ -30,15 +23,9 @@ class UpdateShareLinkRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'permission' => ['required', Rule::in(self::ASSIGNABLE_PERMISSIONS)],
             'expires_at' => ['nullable', 'date', 'after:now'],
             'max_views' => ['nullable', 'integer', 'min:1'],
         ];
-    }
-
-    public function permission(): StoragePermission
-    {
-        return StoragePermission::from($this->validated('permission'));
     }
 
     public function expiresAt(): ?CarbonImmutable

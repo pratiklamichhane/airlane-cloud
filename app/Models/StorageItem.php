@@ -103,6 +103,11 @@ class StorageItem extends Model
         return $this->hasMany(StorageShareLink::class);
     }
 
+    public function audiences(): HasMany
+    {
+        return $this->hasMany(StorageItemAudience::class);
+    }
+
     public function tags(): BelongsToMany
     {
         return $this->belongsToMany(StorageTag::class)->withTimestamps();

@@ -4,9 +4,10 @@ namespace App\Http\Requests\Storage;
 
 use App\Enums\StoragePermission;
 use App\Models\User;
-use Illuminate\Foundation\Http\FormRequest;
-use Illuminate\Validation\Rule;
 use Carbon\CarbonImmutable;
+use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Support\Collection;
+use Illuminate\Validation\Rule;
 
 class ShareItemWithUserRequest extends FormRequest
 {
@@ -24,6 +25,22 @@ class ShareItemWithUserRequest extends FormRequest
     }
 
     /**
+     * Prepare the data for validation.
+     */
+    protected function prepareForValidation(): void
+    {
+        $emails = $this->input('emails');
+
+        if (is_string($emails)) {
+            $segments = preg_split('/[\s,]+/', $emails, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+
+            $this->merge([
+                'emails' => array_map(static fn (string $email) => strtolower(trim($email)), $segments),
+            ]);
+        }
+    }
+
+    /**
      * Get the validation rules that apply to the request.
      *
      * @return array<string, \Illuminate\Contracts\Validation\ValidationRule|array<mixed>|string>
@@ -31,20 +48,27 @@ class ShareItemWithUserRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'email' => ['required', 'email', Rule::exists('users', 'email')],
+            'emails' => ['required', 'array', 'min:1'],
+            'emails.*' => ['required', 'email', Rule::exists('users', 'email')],
             'permission' => ['required', Rule::in(self::ASSIGNABLE_PERMISSIONS)],
             'expires_at' => ['nullable', 'date', 'after:now'],
         ];
     }
 
-    public function targetUser(): User
+    /**
+     * @return Collection<int, User>
+     */
+    public function targetUsers(): Collection
     {
-        $email = $this->validated('email');
+        $emails = $this->validated('emails');
 
-        /** @var User $user */
-        $user = User::query()->where('email', $email)->firstOrFail();
+        if (! is_array($emails)) {
+            $emails = [$emails];
+        }
 
-        return $user;
+        return User::query()
+            ->whereIn('email', $emails)
+            ->get();
     }
 
     public function permission(): StoragePermission

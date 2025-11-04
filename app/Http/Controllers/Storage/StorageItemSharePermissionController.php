@@ -23,21 +23,26 @@ class StorageItemSharePermissionController extends Controller
         $actor = $request->user();
         $this->ensureOwner($storageItem, $actor);
 
-        $target = $request->targetUser();
+        $targets = $request->targetUsers()
+            ->unique(fn (User $user) => $user->getKey())
+            ->reject(fn (User $user) => $user->is($actor) || $user->is($storageItem->owner))
+            ->values();
 
-        if ($target->is($actor) || $target->is($storageItem->owner)) {
+        if ($targets->isEmpty()) {
             throw ValidationException::withMessages([
-                'email' => 'You cannot share an item with yourself.',
+                'emails' => 'Provide at least one collaborator other than yourself.',
             ]);
         }
 
-        $storageService->grantPermission(
-            $storageItem,
-            $target,
-            $actor,
-            $request->permission(),
-            $request->expiresAt(),
-        );
+        foreach ($targets as $target) {
+            $storageService->grantPermission(
+                $storageItem,
+                $target,
+                $actor,
+                $request->permission(),
+                $request->expiresAt(),
+            );
+        }
 
         return redirect()->back();
     }
