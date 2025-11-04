@@ -60,6 +60,41 @@ class StorageItemResource extends JsonResource
                     'color' => $tag->color,
                 ])->all();
             }),
+            'sharing' => [
+                'public_link' => $this->whenLoaded('shareLinks', function () {
+                    $link = $this->shareLinks->first();
+
+                    if ($link === null) {
+                        return null;
+                    }
+
+                    return [
+                        'id' => $link->getKey(),
+                        'permission' => $link->permission->value,
+                        'max_views' => $link->max_views,
+                        'view_count' => $link->view_count,
+                        'expires_at' => $link->expires_at?->toIso8601String(),
+                        'token' => $link->token,
+                        'url' => route('storage.share-links.show', ['token' => $link->token]),
+                    ];
+                }, null),
+                'permissions' => $this->whenLoaded('permissions', function () {
+                    return $this->permissions->map(static function ($permission) {
+                        return [
+                            'id' => $permission->getKey(),
+                            'permission' => $permission->permission->value,
+                            'expires_at' => $permission->expires_at?->toIso8601String(),
+                            'user' => $permission->relationLoaded('user') && $permission->user
+                                ? [
+                                    'id' => $permission->user->getKey(),
+                                    'name' => $permission->user->name,
+                                    'email' => $permission->user->email,
+                                ]
+                                : null,
+                        ];
+                    })->all();
+                }, []),
+            ],
             'created_at' => $this->created_at?->toIso8601String(),
             'updated_at' => $this->updated_at?->toIso8601String(),
             'deleted_at' => $this->deleted_at?->toIso8601String(),

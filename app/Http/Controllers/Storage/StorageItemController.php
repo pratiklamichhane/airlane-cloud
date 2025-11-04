@@ -3,21 +3,24 @@
 namespace App\Http\Controllers\Storage;
 
 use App\Http\Controllers\Controller;
+use App\Http\Controllers\Storage\Concerns\HandlesStorageItemResponses;
 use App\Models\StorageItem;
+use App\Models\User;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
-use Illuminate\Support\Facades\Storage;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class StorageItemController extends Controller
 {
+    use HandlesStorageItemResponses;
+
     public function show(Request $request, StorageItem $storageItem): Response|BinaryFileResponse|StreamedResponse|RedirectResponse
     {
-        $user = $request->user();
+        $storageItem->loadMissing('latestVersion');
 
-        if ($user === null || $storageItem->user_id !== $user->getKey()) {
+        if (! $this->userHasAccess($request->user(), $storageItem)) {
             abort(404);
         }
 
@@ -27,51 +30,32 @@ class StorageItemController extends Controller
         }
 
         if ($storageItem->isFile()) {
-            if ($storageItem->stored_path === null) {
-                abort(404);
-            }
-
-            $disk = $storageItem->disk ?: config('airlane.storage_disk');
-
-            if (! Storage::disk($disk)->exists($storageItem->stored_path)) {
-                abort(404);
-            }
-
-            $name = $storageItem->metadata['original_name'] ?? $storageItem->name;
-            $contentType = $storageItem->mime_type ?: 'application/octet-stream';
-            $stream = Storage::disk($disk)->readStream($storageItem->stored_path);
-
-            if ($stream === false) {
-                abort(404);
-            }
-
-            $headers = [
-                'Content-Type' => $contentType,
-                'Content-Disposition' => 'inline; filename="'.$name.'"',
-            ];
-
-            return response()->stream(function () use ($stream): void {
-                fpassthru($stream);
-                fclose($stream);
-            }, 200, $headers);
+            return $this->streamStorageFile($storageItem);
         }
 
         if ($storageItem->isNote()) {
-            $storageItem->loadMissing('latestVersion');
-
-            $content = $storageItem->latestVersion?->content;
-
-            if ($content === null) {
-                abort(404);
-            }
-
-            $noteName = $storageItem->metadata['original_name'] ?? $storageItem->name;
-
-            return response($content)
-                ->header('Content-Type', 'text/plain; charset=UTF-8')
-                ->header('Content-Disposition', 'inline; filename="'.$noteName.'.txt"');
+            return $this->renderStorageNote($storageItem);
         }
 
         abort(404);
+    }
+
+    private function userHasAccess(?User $user, StorageItem $storageItem): bool
+    {
+        if ($user === null) {
+            return false;
+        }
+
+        if ($storageItem->user_id === $user->getKey()) {
+            return true;
+        }
+
+        return $storageItem->permissions()
+            ->where('user_id', $user->getKey())
+            ->where(static function ($query): void {
+                $query->whereNull('expires_at')
+                    ->orWhere('expires_at', '>', now());
+            })
+            ->exists();
     }
 }

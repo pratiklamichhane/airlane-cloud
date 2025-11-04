@@ -3,10 +3,14 @@
 namespace App\Services\Storage;
 
 use App\Enums\StorageItemType;
+use App\Enums\StoragePermission;
 use App\Exceptions\Storage\FileSizeLimitExceededException;
 use App\Models\StorageItem;
+use App\Models\StorageItemPermission;
 use App\Models\StorageItemVersion;
+use App\Models\StorageShareLink;
 use App\Models\User;
+use Carbon\CarbonImmutable;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
@@ -231,6 +235,102 @@ class StorageService
     public function restore(StorageItem $item): void
     {
         $item->restore();
+    }
+
+    public function grantPermission(StorageItem $item, User $recipient, User $actor, StoragePermission $permission, ?CarbonImmutable $expiresAt = null): StorageItemPermission
+    {
+        return DB::transaction(function () use ($item, $recipient, $actor, $permission, $expiresAt) {
+            /** @var StorageItemPermission $record */
+            $record = StorageItemPermission::query()->updateOrCreate(
+                [
+                    'storage_item_id' => $item->getKey(),
+                    'user_id' => $recipient->getKey(),
+                ],
+                [
+                    'granted_by' => $actor->getKey(),
+                    'permission' => $permission,
+                    'expires_at' => $expiresAt,
+                ],
+            );
+
+            return $record->fresh(['user']);
+        });
+    }
+
+    public function updatePermission(StorageItemPermission $permission, StoragePermission $level, ?CarbonImmutable $expiresAt = null): StorageItemPermission
+    {
+        return DB::transaction(function () use ($permission, $level, $expiresAt) {
+            $permission->forceFill([
+                'permission' => $level,
+                'expires_at' => $expiresAt,
+            ])->save();
+
+            return $permission->fresh(['user']);
+        });
+    }
+
+    public function revokePermission(StorageItemPermission $permission): void
+    {
+        DB::transaction(static function () use ($permission): void {
+            $permission->delete();
+        });
+    }
+
+    public function enablePublicLink(
+        StorageItem $item,
+        User $creator,
+        StoragePermission $permission,
+        ?CarbonImmutable $expiresAt = null,
+        ?int $maxViews = null,
+    ): StorageShareLink {
+        return DB::transaction(function () use ($item, $creator, $permission, $expiresAt, $maxViews) {
+            $link = $item->shareLinks()->first();
+
+            if ($link === null) {
+                $link = $item->shareLinks()->create([
+                    'created_by' => $creator->getKey(),
+                    'token' => Str::uuid()->toString(),
+                    'permission' => $permission,
+                    'expires_at' => $expiresAt,
+                    'max_views' => $maxViews,
+                    'view_count' => 0,
+                ]);
+
+                return $link->fresh();
+            }
+
+            $link->forceFill([
+                'permission' => $permission,
+                'expires_at' => $expiresAt,
+                'max_views' => $maxViews,
+            ])->save();
+
+            return $link->refresh();
+        });
+    }
+
+    public function updatePublicLink(
+        StorageShareLink $link,
+        StoragePermission $permission,
+        ?CarbonImmutable $expiresAt = null,
+        ?int $maxViews = null,
+    ): StorageShareLink {
+        return DB::transaction(function () use ($link, $permission, $expiresAt, $maxViews) {
+            $link->forceFill([
+                'permission' => $permission,
+                'expires_at' => $expiresAt,
+                'max_views' => $maxViews,
+            ])->save();
+
+            return $link->refresh();
+        });
+    }
+
+    public function disablePublicLink(StorageShareLink $link): void
+    {
+        DB::transaction(static function () use ($link): void {
+            $link->delete();
+        });
     }
 
     private function createVersion(StorageItem $item, array $attributes): StorageItemVersion

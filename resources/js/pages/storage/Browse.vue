@@ -36,14 +36,17 @@ import {
 import Textarea from '@/components/ui/textarea/Textarea.vue';
 import {
     ArrowRight,
+    Copy,
     FileText,
     Folder as FolderIcon,
     NotebookPen,
     Pin,
+    Share2,
     Star,
+    Trash2,
     UploadCloud,
 } from 'lucide-vue-next';
-import { computed, ref, toRefs, watch } from 'vue';
+import { computed, onBeforeUnmount, ref, toRefs, watch } from 'vue';
 import type { Ref } from 'vue';
 
 interface StorageItemTag {
@@ -60,6 +63,36 @@ interface StorageItemVersion {
     checksum?: string | null;
     created_at?: string | null;
     content?: string | null;
+}
+
+type StoragePermissionLevel = 'viewer' | 'editor' | 'owner';
+
+interface StorageItemShareUser {
+    id: number;
+    name?: string | null;
+    email: string;
+}
+
+interface StorageItemSharePermission {
+    id: number;
+    permission: StoragePermissionLevel;
+    expires_at?: string | null;
+    user: StorageItemShareUser | null;
+}
+
+interface StorageItemPublicLink {
+    id: number;
+    permission: StoragePermissionLevel;
+    max_views?: number | null;
+    view_count: number;
+    expires_at?: string | null;
+    token: string;
+    url: string;
+}
+
+interface StorageItemSharing {
+    public_link: StorageItemPublicLink | null;
+    permissions: StorageItemSharePermission[];
 }
 
 interface StorageItemResource {
@@ -81,6 +114,7 @@ interface StorageItemResource {
     is_favorite: boolean;
     latest_version?: StorageItemVersion | null;
     tags?: StorageItemTag[];
+    sharing?: StorageItemSharing;
     created_at?: string | null;
     updated_at?: string | null;
 }
@@ -169,6 +203,7 @@ const noteSheetOpen = ref(false);
 const uploadFormHandlers = ref<{ reset?: () => void; clearErrors?: () => void }>({});
 const folderFormHandlers = ref<{ reset?: () => void; clearErrors?: () => void }>({});
 const noteFormHandlers = ref<{ reset?: () => void; clearErrors?: () => void }>({});
+const shareFormHandlers = ref<{ reset?: () => void; clearErrors?: () => void }>({});
 
 const closeUploadSheet = () => closeSheet(uploadSheetOpen, uploadFormHandlers);
 const closeFolderSheet = () => closeSheet(folderSheetOpen, folderFormHandlers);
@@ -209,6 +244,15 @@ const previewMeta = computed(() => {
     return parts.join(' • ');
 });
 
+const shareOpen = ref(false);
+const shareItem = ref<StorageItemResource | null>(null);
+const shareCopyState = ref<'idle' | 'copied'>('idle');
+
+let shareCopyTimeout: ReturnType<typeof setTimeout> | null = null;
+
+const sharePermissions = computed(() => shareItem.value?.sharing?.permissions ?? []);
+const publicLink = computed(() => shareItem.value?.sharing?.public_link ?? null);
+
 watch(uploadSheetOpen, (isOpen) => {
     if (!isOpen) {
         uploadFormHandlers.value.reset?.();
@@ -236,6 +280,29 @@ watch(previewOpen, (isOpen) => {
     }
 });
 
+watch(shareOpen, (isOpen) => {
+    if (!isOpen) {
+        shareFormHandlers.value.reset?.();
+        shareFormHandlers.value.clearErrors?.();
+        shareItem.value = null;
+        shareCopyState.value = 'idle';
+
+        if (shareCopyTimeout) {
+            clearTimeout(shareCopyTimeout);
+            shareCopyTimeout = null;
+        }
+    }
+});
+
+watch(publicLink, () => {
+    if (shareCopyTimeout) {
+        clearTimeout(shareCopyTimeout);
+        shareCopyTimeout = null;
+    }
+
+    shareCopyState.value = 'idle';
+});
+
 function openPreview(item: StorageItemResource): void {
     previewItem.value = item;
     previewOpen.value = true;
@@ -253,6 +320,23 @@ function handlePreviewClick(event: MouseEvent, item: StorageItemResource): void 
     event.preventDefault();
     openPreview(item);
 }
+
+function openShare(item: StorageItemResource): void {
+    shareItem.value = item;
+    shareOpen.value = true;
+    shareCopyState.value = 'idle';
+}
+
+const permissionLabels: Record<StoragePermissionLevel, string> = {
+    viewer: 'Can view',
+    editor: 'Can edit',
+    owner: 'Owner',
+};
+
+const sharePermissionOptions = [
+    { value: 'viewer' as const, label: permissionLabels.viewer },
+    { value: 'editor' as const, label: permissionLabels.editor },
+];
 
 const pageTitle = computed(() => folder.value?.name ?? 'All Files');
 const headTitle = computed(() => (folder.value ? `${folder.value.name} · Storage` : 'Storage'));
@@ -287,6 +371,21 @@ const paginatedItems = computed(() => items.value?.data ?? []);
 const paginationLinks = computed(() => items.value?.meta?.links ?? []);
 const totalItems = computed(() => items.value?.meta?.total ?? paginatedItems.value.length);
 const hasItems = computed(() => paginatedItems.value.length > 0);
+
+watch(paginatedItems, (itemList) => {
+    if (!shareItem.value) {
+        return;
+    }
+
+    const updated = itemList.find((candidate) => candidate.id === shareItem.value?.id);
+
+    if (updated) {
+        shareItem.value = updated;
+    } else {
+        shareOpen.value = false;
+        shareItem.value = null;
+    }
+});
 
 const emptyHeadline = computed(() => (folder.value ? 'This folder is empty' : 'Your storage is ready'));
 const emptyBody = computed(() =>
@@ -392,6 +491,48 @@ function formatTrashRetention(days: number): string {
     return `${days} days in trash`;
 }
 
+function formatPermissionLabel(level: StoragePermissionLevel): string {
+    return permissionLabels[level] ?? level;
+}
+
+function formatDateTimeLocal(value?: string | null): string {
+    if (!value) {
+        return '';
+    }
+
+    const date = new Date(value);
+
+    if (Number.isNaN(date.getTime())) {
+        return '';
+    }
+
+    const pad = (input: number) => input.toString().padStart(2, '0');
+
+    const year = date.getFullYear();
+    const month = pad(date.getMonth() + 1);
+    const day = pad(date.getDate());
+    const hours = pad(date.getHours());
+    const minutes = pad(date.getMinutes());
+
+    return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
+function shareExpiresLabel(value?: string | null): string {
+    if (!value) {
+        return 'No expiry';
+    }
+
+    return `Expires ${formatDate(value)}`;
+}
+
+function shareViewCountLabel(link: StorageItemPublicLink): string {
+    if (link.max_views === null || link.max_views === undefined) {
+        return `${link.view_count} views`;
+    }
+
+    return `${link.view_count} of ${link.max_views} views`;
+}
+
 function closeSheet(
     openRef: Ref<boolean>,
     handlersRef: Ref<{ reset?: () => void; clearErrors?: () => void }>,
@@ -419,6 +560,12 @@ function registerNoteHandlers(reset: () => void, clearErrors: () => void): true 
     return true;
 }
 
+function registerShareHandlers(reset: () => void, clearErrors: () => void): true {
+    shareFormHandlers.value = { reset, clearErrors };
+
+    return true;
+}
+
 function itemUrl(item: StorageItemResource): string | null {
     if (item.is_folder) {
         return storage.index({ query: { folder: item.id } }).url;
@@ -430,6 +577,38 @@ function itemUrl(item: StorageItemResource): string | null {
 
     return null;
 }
+
+async function copyPublicLink(): Promise<void> {
+    const link = publicLink.value?.url;
+
+    if (!link || !(navigator.clipboard && navigator.clipboard.writeText)) {
+        return;
+    }
+
+    try {
+        await navigator.clipboard.writeText(link);
+        shareCopyState.value = 'copied';
+
+        if (shareCopyTimeout) {
+            clearTimeout(shareCopyTimeout);
+        }
+
+        shareCopyTimeout = setTimeout(() => {
+            shareCopyState.value = 'idle';
+            shareCopyTimeout = null;
+        }, 2000);
+    } catch (error) {
+        console.error('Unable to copy link', error);
+    }
+}
+
+onBeforeUnmount(() => {
+    if (shareCopyTimeout) {
+        clearTimeout(shareCopyTimeout);
+        shareCopyTimeout = null;
+    }
+});
+
 </script>
 
 <template>
@@ -888,7 +1067,18 @@ function itemUrl(item: StorageItemResource): string | null {
                                     </Link>
                                 </Button>
                                 <Button
-                                    v-else-if="(item.is_file || item.is_note) && itemUrl(item)"
+                                    v-if="(item.is_file || item.is_note) && itemUrl(item)"
+                                    variant="ghost"
+                                    size="sm"
+                                    class="gap-1"
+                                    type="button"
+                                    @click="openShare(item)"
+                                >
+                                    Share
+                                    <Share2 class="size-3.5" />
+                                </Button>
+                                <Button
+                                    v-if="(item.is_file || item.is_note) && itemUrl(item)"
                                     variant="ghost"
                                     size="sm"
                                     class="gap-1"
@@ -952,7 +1142,288 @@ function itemUrl(item: StorageItemResource): string | null {
             </Card>
         </div>
 
-        <Dialog :open="previewOpen" @update:open="(value) => (previewOpen = value)">
+    <Dialog v-model:open="shareOpen">
+            <DialogContent class="w-full max-w-3xl overflow-hidden sm:max-w-4xl">
+                <DialogHeader class="gap-1.5">
+                    <DialogTitle>
+                        Share {{ shareItem?.name ?? 'item' }}
+                    </DialogTitle>
+                    <DialogDescription>
+                        Choose who can view or edit this {{ shareItem?.is_note ? 'note' : 'file' }}.
+                    </DialogDescription>
+                </DialogHeader>
+
+                <div v-if="shareItem" class="flex flex-col gap-6">
+                    <section class="space-y-4 rounded-lg border border-border/60 bg-muted/30 p-4">
+                        <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                            <div class="space-y-1">
+                                <h3 class="text-sm font-medium text-foreground">Public link</h3>
+                                <p class="text-xs text-muted-foreground">
+                                    Generate a link that anyone can use to access this item.
+                                </p>
+                            </div>
+                            <Button
+                                v-if="publicLink"
+                                variant="outline"
+                                size="sm"
+                                class="gap-2"
+                                type="button"
+                                :disabled="shareCopyState === 'copied'"
+                                @click="copyPublicLink"
+                            >
+                                <Copy class="size-3.5" />
+                                {{ shareCopyState === 'copied' ? 'Copied' : 'Copy link' }}
+                            </Button>
+                        </div>
+
+                        <Form
+                            v-bind="publicLink
+                                ? storage.items.share.link.update.form({ storageItem: shareItem.id, storageShareLink: publicLink.id })
+                                : storage.items.share.link.store.form({ storageItem: shareItem.id })"
+                            :options="{ preserveScroll: true }"
+                            reset-on-success
+                            v-slot="{ errors, processing }"
+                        >
+                            <div class="grid gap-3 sm:grid-cols-3">
+                                <div class="grid gap-1">
+                                    <Label for="share-link-permission">Permission</Label>
+                                    <select
+                                        id="share-link-permission"
+                                        name="permission"
+                                        class="border-input focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] dark:bg-input/30 h-10 w-full rounded-md border bg-background px-3 text-sm shadow-xs outline-none transition-[color,box-shadow]"
+                                        :value="publicLink?.permission ?? 'viewer'"
+                                    >
+                                        <option
+                                            v-for="option in sharePermissionOptions"
+                                            :key="option.value"
+                                            :value="option.value"
+                                        >
+                                            {{ option.label }}
+                                        </option>
+                                    </select>
+                                    <InputError :message="errors.permission" />
+                                </div>
+                                <div class="grid gap-1">
+                                    <Label for="share-link-max-views">View limit</Label>
+                                    <Input
+                                        id="share-link-max-views"
+                                        name="max_views"
+                                        type="number"
+                                        min="1"
+                                        :value="publicLink?.max_views ?? ''"
+                                        placeholder="Unlimited"
+                                    />
+                                    <InputError :message="errors.max_views" />
+                                </div>
+                                <div class="grid gap-1">
+                                    <Label for="share-link-expires">Expires</Label>
+                                    <Input
+                                        id="share-link-expires"
+                                        name="expires_at"
+                                        type="datetime-local"
+                                        :value="formatDateTimeLocal(publicLink?.expires_at ?? null)"
+                                    />
+                                    <InputError :message="errors.expires_at" />
+                                </div>
+                            </div>
+                            <div class="flex justify-end gap-2 pt-3">
+                                <Button type="submit" :disabled="processing">
+                                    {{ publicLink ? 'Update link' : 'Create link' }}
+                                </Button>
+                            </div>
+                        </Form>
+
+                        <div
+                            v-if="publicLink"
+                            class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground"
+                        >
+                            <span>{{ formatPermissionLabel(publicLink.permission) }}</span>
+                            <span aria-hidden="true">•</span>
+                            <span>{{ shareExpiresLabel(publicLink.expires_at) }}</span>
+                            <span aria-hidden="true">•</span>
+                            <span>{{ shareViewCountLabel(publicLink) }}</span>
+                        </div>
+
+                        <Form
+                            v-if="publicLink"
+                            v-bind="storage.items.share.link.destroy.form({ storageItem: shareItem.id, storageShareLink: publicLink.id })"
+                            :options="{ preserveScroll: true }"
+                            v-slot="{ processing }"
+                        >
+                            <Button
+                                type="submit"
+                                variant="destructive"
+                                size="sm"
+                                :disabled="processing"
+                                class="gap-2"
+                            >
+                                <Trash2 class="size-3.5" />
+                                Disable link
+                            </Button>
+                        </Form>
+                    </section>
+
+                    <section class="space-y-4">
+                        <div class="space-y-1">
+                            <h3 class="text-sm font-medium text-foreground">Share with people</h3>
+                            <p class="text-xs text-muted-foreground">
+                                Invite specific teammates by email and control their access level.
+                            </p>
+                        </div>
+
+                        <Form
+                            v-bind="storage.items.share.permissions.store.form({ storageItem: shareItem.id })"
+                            :options="{ preserveScroll: true }"
+                            reset-on-success
+                            v-slot="{ errors, processing, reset, clearErrors }"
+                        >
+                            <template v-if="registerShareHandlers(reset, clearErrors)" />
+                            <div class="grid gap-3 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)]">
+                                <div class="grid gap-1">
+                                    <Label for="share-email">Email</Label>
+                                    <Input
+                                        id="share-email"
+                                        name="email"
+                                        type="email"
+                                        required
+                                        autocomplete="email"
+                                        placeholder="collaborator@example.com"
+                                    />
+                                    <InputError :message="errors.email" />
+                                </div>
+                                <div class="grid gap-1">
+                                    <Label for="share-permission">Permission</Label>
+                                    <select
+                                        id="share-permission"
+                                        name="permission"
+                                        class="border-input focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] dark:bg-input/30 h-10 w-full rounded-md border bg-background px-3 text-sm shadow-xs outline-none transition-[color,box-shadow]"
+                                    >
+                                        <option
+                                            v-for="option in sharePermissionOptions"
+                                            :key="option.value"
+                                            :value="option.value"
+                                        >
+                                            {{ option.label }}
+                                        </option>
+                                    </select>
+                                    <InputError :message="errors.permission" />
+                                </div>
+                                <div class="grid gap-1">
+                                    <Label for="share-expires">Expires</Label>
+                                    <Input id="share-expires" name="expires_at" type="datetime-local" />
+                                    <InputError :message="errors.expires_at" />
+                                </div>
+                            </div>
+                            <div class="flex justify-end gap-2 pt-3">
+                                <Button type="submit" :disabled="processing">
+                                    Share
+                                </Button>
+                            </div>
+                        </Form>
+
+                        <div v-if="sharePermissions.length" class="space-y-3">
+                            <div
+                                v-for="permission in sharePermissions"
+                                :key="permission.id"
+                                class="rounded-lg border border-border/60 bg-background p-4 shadow-xs"
+                            >
+                                <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                                    <div class="space-y-1">
+                                        <div class="text-sm font-medium text-foreground">
+                                            {{ permission.user?.name ?? permission.user?.email ?? 'Shared user' }}
+                                        </div>
+                                        <div class="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
+                                            <span>{{ permission.user?.email ?? 'Unknown user' }}</span>
+                                            <span aria-hidden="true">•</span>
+                                            <span>{{ formatPermissionLabel(permission.permission) }}</span>
+                                            <span aria-hidden="true">•</span>
+                                            <span>{{ shareExpiresLabel(permission.expires_at) }}</span>
+                                        </div>
+                                    </div>
+
+                                    <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+                                        <Form
+                                            v-bind="storage.items.share.permissions.update.form({
+                                                storageItem: shareItem.id,
+                                                storageItemPermission: permission.id,
+                                            })"
+                                            :options="{ preserveScroll: true }"
+                                            reset-on-success
+                                            class="flex flex-col gap-2 sm:flex-row sm:items-center"
+                                            v-slot="{ errors, processing }"
+                                        >
+                                            <div class="flex flex-wrap items-center gap-2">
+                                                <select
+                                                    aria-label="Permission"
+                                                    name="permission"
+                                                    class="border-input focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] dark:bg-input/30 h-9 rounded-md border bg-background px-3 text-sm shadow-xs outline-none transition-[color,box-shadow]"
+                                                    :value="permission.permission"
+                                                >
+                                                    <option
+                                                        v-for="option in sharePermissionOptions"
+                                                        :key="`${permission.id}-${option.value}`"
+                                                        :value="option.value"
+                                                    >
+                                                        {{ option.label }}
+                                                    </option>
+                                                </select>
+                                                <Input
+                                                    aria-label="Expiry"
+                                                    name="expires_at"
+                                                    type="datetime-local"
+                                                    :value="formatDateTimeLocal(permission.expires_at ?? null)"
+                                                />
+                                                <Button type="submit" size="sm" :disabled="processing">
+                                                    Save
+                                                </Button>
+                                            </div>
+                                            <div class="flex flex-col gap-1 text-xs text-destructive">
+                                                <InputError :message="errors.permission" />
+                                                <InputError :message="errors.expires_at" />
+                                            </div>
+                                        </Form>
+
+                                        <Form
+                                            v-bind="storage.items.share.permissions.destroy.form({
+                                                storageItem: shareItem.id,
+                                                storageItemPermission: permission.id,
+                                            })"
+                                            :options="{ preserveScroll: true }"
+                                            v-slot="{ processing }"
+                                        >
+                                            <Button
+                                                type="submit"
+                                                variant="ghost"
+                                                size="sm"
+                                                class="gap-2 text-destructive hover:text-destructive"
+                                                :disabled="processing"
+                                            >
+                                                <Trash2 class="size-3.5" />
+                                                Remove
+                                            </Button>
+                                        </Form>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <p v-else class="text-xs text-muted-foreground">
+                            No one else has access yet.
+                        </p>
+                    </section>
+                </div>
+
+                <DialogFooter class="flex justify-end border-t border-border/50 pt-4">
+                    <DialogClose as-child>
+                        <Button type="button">
+                            Close
+                        </Button>
+                    </DialogClose>
+                </DialogFooter>
+            </DialogContent>
+        </Dialog>
+
+    <Dialog v-model:open="previewOpen">
             <DialogContent class="w-full max-w-4xl overflow-hidden sm:max-w-5xl">
                 <DialogHeader class="gap-1.5">
                     <DialogTitle>{{ previewItem?.name ?? 'Preview' }}</DialogTitle>

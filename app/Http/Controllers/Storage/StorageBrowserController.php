@@ -23,7 +23,7 @@ class StorageBrowserController extends Controller
             ->forUser($user)
             ->whereNull('deleted_at')
             ->where('parent_id', $currentFolder?->getKey())
-            ->with(['latestVersion', 'tags'])
+            ->with(['latestVersion', 'tags', 'permissions.user', 'shareLinks'])
             ->orderByDesc('is_pinned')
             ->orderByDesc('is_favorite')
             ->orderBy('type')
