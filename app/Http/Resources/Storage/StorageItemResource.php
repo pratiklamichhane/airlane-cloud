@@ -2,6 +2,7 @@
 
 namespace App\Http\Resources\Storage;
 
+use App\Enums\StorageItemType;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
@@ -14,9 +15,9 @@ class StorageItemResource extends JsonResource
      */
     public function toArray(Request $request): array
     {
-        $type = $this->type instanceof \App\Enums\StorageItemType
+        $type = $this->type instanceof StorageItemType
             ? $this->type
-            : \App\Enums\StorageItemType::from($this->type);
+            : StorageItemType::from($this->type);
 
         return [
             'id' => $this->getKey(),
@@ -30,12 +31,12 @@ class StorageItemResource extends JsonResource
             'mime_type' => $this->mime_type,
             'checksum' => $this->checksum,
             'metadata' => $this->metadata ?? [],
-            'is_folder' => $type === \App\Enums\StorageItemType::Folder,
-            'is_file' => $type === \App\Enums\StorageItemType::File,
-            'is_note' => $type === \App\Enums\StorageItemType::Note,
+            'is_folder' => $type === StorageItemType::Folder,
+            'is_file' => $type === StorageItemType::File,
+            'is_note' => $type === StorageItemType::Note,
             'is_pinned' => (bool) $this->is_pinned,
             'is_favorite' => (bool) $this->is_favorite,
-            'latest_version' => $this->whenLoaded('latestVersion', function () {
+            'latest_version' => $this->whenLoaded('latestVersion', function () use ($type) {
                 $version = $this->latestVersion;
 
                 if ($version === null) {
@@ -49,6 +50,7 @@ class StorageItemResource extends JsonResource
                     'mime_type' => $version->mime_type,
                     'checksum' => $version->checksum,
                     'created_at' => $version->created_at?->toIso8601String(),
+                    'content' => $type === StorageItemType::Note ? $version->content : null,
                 ];
             }),
             'tags' => $this->whenLoaded('tags', function () {

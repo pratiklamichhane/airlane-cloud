@@ -24,6 +24,15 @@ import {
     SheetTrigger,
 } from '@/components/ui/sheet';
 import { Spinner } from '@/components/ui/spinner';
+import {
+    Dialog,
+    DialogClose,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+} from '@/components/ui/dialog';
 import Textarea from '@/components/ui/textarea/Textarea.vue';
 import {
     ArrowRight,
@@ -50,6 +59,7 @@ interface StorageItemVersion {
     mime_type?: string | null;
     checksum?: string | null;
     created_at?: string | null;
+    content?: string | null;
 }
 
 interface StorageItemResource {
@@ -164,6 +174,41 @@ const closeUploadSheet = () => closeSheet(uploadSheetOpen, uploadFormHandlers);
 const closeFolderSheet = () => closeSheet(folderSheetOpen, folderFormHandlers);
 const closeNoteSheet = () => closeSheet(noteSheetOpen, noteFormHandlers);
 
+const previewOpen = ref(false);
+const previewItem = ref<StorageItemResource | null>(null);
+
+const previewUrl = computed(() => {
+    if (!previewItem.value) {
+        return null;
+    }
+
+    return itemUrl(previewItem.value);
+});
+
+const previewNoteContent = computed(() => {
+    if (!previewItem.value || !previewItem.value.is_note) {
+        return null;
+    }
+
+    return previewItem.value.latest_version?.content ?? null;
+});
+
+const previewMeta = computed(() => {
+    if (!previewItem.value) {
+        return null;
+    }
+
+    const item = previewItem.value;
+    const parts: string[] = [typeLabelFor(item), formatBytes(item.size_bytes), `Updated ${formatDate(item.updated_at)}`];
+    const version = versionLabelFor(item);
+
+    if (version) {
+        parts.push(version);
+    }
+
+    return parts.join(' • ');
+});
+
 watch(uploadSheetOpen, (isOpen) => {
     if (!isOpen) {
         uploadFormHandlers.value.reset?.();
@@ -184,6 +229,30 @@ watch(noteSheetOpen, (isOpen) => {
         noteFormHandlers.value.clearErrors?.();
     }
 });
+
+watch(previewOpen, (isOpen) => {
+    if (!isOpen) {
+        previewItem.value = null;
+    }
+});
+
+function openPreview(item: StorageItemResource): void {
+    previewItem.value = item;
+    previewOpen.value = true;
+}
+
+function handlePreviewClick(event: MouseEvent, item: StorageItemResource): void {
+    if (event.defaultPrevented) {
+        return;
+    }
+
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+        return;
+    }
+
+    event.preventDefault();
+    openPreview(item);
+}
 
 const pageTitle = computed(() => folder.value?.name ?? 'All Files');
 const headTitle = computed(() => (folder.value ? `${folder.value.name} · Storage` : 'Storage'));
@@ -348,6 +417,18 @@ function registerNoteHandlers(reset: () => void, clearErrors: () => void): true 
     noteFormHandlers.value = { reset, clearErrors };
 
     return true;
+}
+
+function itemUrl(item: StorageItemResource): string | null {
+    if (item.is_folder) {
+        return storage.index({ query: { folder: item.id } }).url;
+    }
+
+    if (item.is_file || item.is_note) {
+        return storage.items.show({ storageItem: item.id }).url;
+    }
+
+    return null;
 }
 </script>
 
@@ -709,7 +790,28 @@ function registerNoteHandlers(reset: () => void, clearErrors: () => void): true 
                                 </div>
                                 <div class="min-w-0 space-y-2">
                                     <div class="flex flex-wrap items-center gap-2">
+                                        <template v-if="item.is_folder && itemUrl(item)">
+                                            <Link
+                                                :href="itemUrl(item) as string"
+                                                preserve-scroll
+                                                class="truncate text-sm font-medium text-primary underline-offset-4 hover:underline"
+                                                :title="item.name"
+                                            >
+                                                {{ item.name }}
+                                            </Link>
+                                        </template>
+                                        <template v-else-if="itemUrl(item)">
+                                            <a
+                                                :href="itemUrl(item) as string"
+                                                class="truncate text-sm font-medium text-primary underline-offset-4 hover:underline"
+                                                :title="item.name"
+                                                @click="handlePreviewClick($event, item)"
+                                            >
+                                                {{ item.name }}
+                                            </a>
+                                        </template>
                                         <span
+                                            v-else
                                             class="truncate text-sm font-medium text-foreground"
                                             :title="item.name"
                                         >
@@ -771,19 +873,30 @@ function registerNoteHandlers(reset: () => void, clearErrors: () => void): true 
                             </div>
                             <div class="flex shrink-0 items-center gap-2">
                                 <Button
-                                    v-if="item.is_folder"
+                                    v-if="item.is_folder && itemUrl(item)"
                                     variant="ghost"
                                     size="sm"
                                     as-child
                                     class="gap-1"
                                 >
                                     <Link
-                                        :href="storage.index({ query: { folder: item.id } })"
+                                        :href="itemUrl(item) as string"
                                         preserve-scroll
                                     >
                                         Open
                                         <ArrowRight class="size-3.5" />
                                     </Link>
+                                </Button>
+                                <Button
+                                    v-else-if="(item.is_file || item.is_note) && itemUrl(item)"
+                                    variant="ghost"
+                                    size="sm"
+                                    class="gap-1"
+                                    type="button"
+                                    @click="openPreview(item)"
+                                >
+                                    View
+                                    <ArrowRight class="size-3.5" />
                                 </Button>
                             </div>
                         </div>
@@ -838,5 +951,67 @@ function registerNoteHandlers(reset: () => void, clearErrors: () => void): true 
                 </CardContent>
             </Card>
         </div>
+
+        <Dialog :open="previewOpen" @update:open="(value) => (previewOpen = value)">
+            <DialogContent class="w-full max-w-4xl overflow-hidden sm:max-w-5xl">
+                <DialogHeader class="gap-1.5">
+                    <DialogTitle>{{ previewItem?.name ?? 'Preview' }}</DialogTitle>
+                    <DialogDescription v-if="previewMeta">
+                        {{ previewMeta }}
+                    </DialogDescription>
+                </DialogHeader>
+
+                <div v-if="previewItem" class="flex flex-col gap-4">
+                    <div v-if="previewItem.is_note" class="flex flex-col gap-3">
+                        <pre
+                            v-if="previewNoteContent !== null"
+                            class="max-h-[60vh] overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-border bg-muted/40 p-4 text-left text-sm text-foreground"
+                        >{{ previewNoteContent }}</pre>
+                        <p v-else class="text-sm text-muted-foreground">
+                            This note does not have any content yet.
+                        </p>
+                    </div>
+
+                    <div v-else-if="previewUrl" class="flex flex-col gap-3">
+                        <iframe
+                            :key="previewItem.id"
+                            :src="previewUrl"
+                            title="File preview"
+                            class="h-[60vh] w-full rounded-lg border border-border bg-background"
+                            loading="lazy"
+                            allowfullscreen
+                        />
+                    </div>
+
+                    <p v-else class="text-sm text-muted-foreground">
+                        We could not generate a preview for this item. Use the download option instead.
+                    </p>
+                </div>
+
+                <DialogFooter class="flex flex-col gap-3 border-t border-border/50 pt-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div v-if="previewItem" class="text-xs text-muted-foreground">
+                        Created {{ formatDate(previewItem.created_at) }}
+                    </div>
+
+                    <div class="flex flex-wrap gap-2 sm:justify-end">
+                        <Button
+                            v-if="previewUrl"
+                            variant="outline"
+                            as-child
+                            class="gap-2"
+                        >
+                            <a :href="previewUrl" target="_blank" rel="noopener noreferrer">
+                                Open in new tab
+                            </a>
+                        </Button>
+                        <DialogClose as-child>
+                            <Button type="button">
+                                Close
+                            </Button>
+                        </DialogClose>
+                    </div>
+                </DialogFooter>
+            </DialogContent>
+        </Dialog>
     </AppLayout>
 </template>

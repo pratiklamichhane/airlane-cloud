@@ -11,22 +11,16 @@ import {
     SidebarMenuButton,
     SidebarMenuItem,
 } from '@/components/ui/sidebar';
-import { dashboard } from '@/routes';
 import storage from '@/routes/storage';
 import { type NavItem } from '@/types';
 import { Link } from '@inertiajs/vue3';
-import { BookOpen, Cloud, Folder, LayoutGrid } from 'lucide-vue-next';
+import { BookOpen, Cloud, Folder } from 'lucide-vue-next';
 import AppLogo from './AppLogo.vue';
 
 const mainNavItems: NavItem[] = [
     {
-        title: 'Dashboard',
-        href: dashboard(),
-        icon: LayoutGrid,
-    },
-    {
         title: 'Storage',
-        href: storage.index(),
+        href: storage.index().url,
         icon: Cloud,
     },
 ];
@@ -51,7 +45,7 @@ const footerNavItems: NavItem[] = [
             <SidebarMenu>
                 <SidebarMenuItem>
                     <SidebarMenuButton size="lg" as-child>
-                        <Link :href="dashboard()">
+                        <Link :href="storage.index().url">
                             <AppLogo />
                         </Link>
                     </SidebarMenuButton>
